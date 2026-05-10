@@ -1,0 +1,92 @@
+# Prod Overlay - Large resources, long retention, HA
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../
+
+namespace: observability
+
+commonLabels:
+  environment: prod
+  tier: production
+  team: platform
+  compliance: pci-dss
+  backup: enabled
+
+commonAnnotations:
+  description: "Production observability stack"
+  sla: "24/7"
+
+patchesJson6902:
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: loki
+      namespace: observability
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "50Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "2Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "4Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "2000m"
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                      - key: app
+                        operator: In
+                        values:
+                          - loki
+                  topologyKey: kubernetes.io/hostname
+
+  - target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      name: falco
+      namespace: falco
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "512Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "250m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "1Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "1000m"
+
+replicas:
+  - name: loki
+    count: 3
+
+configMapGenerator:
+  - name: prod-observability-config
+    behavior: create
+    literals:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=warn
+      - RETENTION_DAYS=30
+      - STORAGE_SIZE=50Gi
+      - HA_MODE=true
+      - REPLICAS=3

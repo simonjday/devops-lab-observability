@@ -1,0 +1,22 @@
+# Kustomize
+/kustomization_build_output.yaml
+
+# Secrets (if any)
+secrets.yaml
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
+*.tmp

@@ -1,0 +1,312 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: falco
+  labels:
+    app.kubernetes.io/part-of: security-stack
+---
+# Falco DaemonSet — kernel module-based runtime security
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostPID: true
+      containers:
+        - name: falco
+          image: falcosecurity/falco:0.37.0
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_PTRACE
+                - SYS_RESOURCE
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_CHROOT
+          args:
+            - /usr/bin/falco
+            - --cri=/run/containerd/containerd.sock
+            - --cri=/run/crio/crio.sock
+            - -o
+            - output_format=json
+            - -c
+            - /etc/falco/falco.yaml
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: containerd-sock
+              mountPath: /run/containerd
+            - name: crio-sock
+              mountPath: /run/crio
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: dev
+              mountPath: /dev
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: boot
+              mountPath: /boot
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: usr
+              mountPath: /usr
+              readOnly: true
+            - name: etc
+              mountPath: /etc
+              readOnly: true
+            - name: falco-config
+              mountPath: /etc/falco
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1024Mi
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd
+        - name: crio-sock
+          hostPath:
+            path: /run/crio
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: boot
+          hostPath:
+            path: /boot
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: usr
+          hostPath:
+            path: /usr
+        - name: etc
+          hostPath:
+            path: /etc
+        - name: falco-config
+          configMap:
+            name: falco-config
+---
+# Falco ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-config
+  namespace: falco
+data:
+  falco.yaml: |
+    # Falco rules (include defaults + custom)
+    rules_file:
+      - /etc/falco/falco_rules.yaml
+      - /etc/falco/falco_rules.local.yaml
+      - /etc/falco/custom_rules.yaml
+      
+    # Engine and output settings
+    engine:
+      kind: modern_ebpf
+      
+    # JSON output for log aggregation
+    output_format: json
+    
+    # Log level: emergency, alert, critical, error, warning, notice, info, debug
+    log_level: notice
+    
+    # Send alerts to stdout/stderr
+    file_output:
+      enabled: true
+      keep_alive: false
+      filename: /dev/stderr
+      
+    # gRPC output for external alerting/streaming
+    grpc:
+      enabled: true
+      bind_address: "0.0.0.0:5060"
+      
+    grpc_output:
+      enabled: true
+      
+    # Metrics for Prometheus scraping
+    metrics:
+      enabled: true
+      interval: 10
+      
+  custom_rules.yaml: |
+    - rule: Unauthorized Process in System Namespace
+      desc: Detect suspicious process execution in system namespaces
+      condition: >
+        spawned_process and
+        container and
+        k8s_audit and
+        (container_privileged or 
+         container_image_tag = "latest")
+      output: >
+        Unauthorized process execution 
+        (user=%user.name command=%proc.cmdline container=%container.info)
+      priority: WARNING
+      tags: [process, container, privilege_escalation]
+      
+    - rule: Write to System Directories
+      desc: Detect writes to critical system directories
+      condition: >
+        write and
+        container and
+        (fd.name glob "/etc/*" or 
+         fd.name glob "/sys/*" or 
+         fd.name glob "/proc/*")
+      output: >
+        Suspicious write to system directory 
+        (user=%user.name file=%fd.name container=%container.info)
+      priority: WARNING
+      tags: [file, container, persistence]
+      
+    - rule: Reverse Shell Activity
+      desc: Detect potential reverse shell connections
+      condition: >
+        outbound and
+        container and
+        (fd.snet_client = "127.0.0.1" or
+         fd.sport > 40000)
+      output: >
+        Potential reverse shell activity 
+        (user=%user.name address=%fd.cip:%fd.cport container=%container.info)
+      priority: CRITICAL
+      tags: [network, container, lateral_movement]
+---
+# Falco Service for gRPC output
+apiVersion: v1
+kind: Service
+metadata:
+  name: falco-grpc
+  namespace: falco
+  labels:
+    app: falco
+spec:
+  type: ClusterIP
+  selector:
+    app: falco
+  ports:
+    - name: grpc
+      port: 5060
+      targetPort: 5060
+---
+# Falco Metrics Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: falco-metrics
+  namespace: falco
+  labels:
+    app: falco
+spec:
+  type: ClusterIP
+  selector:
+    app: falco
+  ports:
+    - name: metrics
+      port: 5555
+      targetPort: 5555
+---
+# ServiceMonitor for Prometheus scraping Falco metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  endpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 10s
+---
+# PrometheusRule for Falco alert thresholds
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: falco-alerts
+  namespace: falco
+spec:
+  groups:
+    - name: falco.rules
+      interval: 30s
+      rules:
+        - alert: FalcoCriticalAlert
+          expr: increase(falco_alerts_total{priority="CRITICAL"}[5m]) > 0
+          for: 1m
+          annotations:
+            summary: "Critical security event detected by Falco"
+            description: "{{ $value }} critical alerts in 5 minutes"
+            
+        - alert: FalcoWarningAlert
+          expr: increase(falco_alerts_total{priority="WARNING"}[5m]) > 5
+          for: 5m
+          annotations:
+            summary: "Multiple warning alerts from Falco"
+            description: "{{ $value }} warnings in 5 minutes"
+---
+# RBAC for Falco
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falco
+  namespace: falco
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: falco
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: falco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: falco
+subjects:
+  - kind: ServiceAccount
+    name: falco
+    namespace: falco

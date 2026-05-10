@@ -1,0 +1,22 @@
+# Root kustomization.yaml
+# Orchestrates all components (Loki + Falco)
+# Usage: kustomize build . | kubectl apply -f -
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: devops-lab-observability
+  version: v1.0.0
+
+commonAnnotations:
+  managed-by: "kustomize"
+
+resources:
+  - observability/loki/loki-stack.yaml
+  - security/falco/falco.yaml
+
+patches: []
